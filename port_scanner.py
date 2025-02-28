@@ -6,7 +6,7 @@ import ipaddress
 #Validadores de padrões de entrada de portas e IPs
 port_range_pattern = re.compile(r"^(\d+)-(\d+)$")
 ip_pattern = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
-ipv6_pattern = re.compile(r"^([a-fA-F0-9]{1,4}:){1,7}[a-fA-F0-9]{1,4}(%\d+)?$")
+
 known_ports =  {
         "echo": [7], "discard": [9], "systat": [11], "daytime": [13], "qotd": [17],
         "chargen": [19], "ftp-data": [20], "ftp": [21], "ssh": [22], "telnet": [23],
@@ -35,6 +35,16 @@ def get_ports(port_range):
         port = int(port_range)
         return port, port
 
+def get_banner(ip, port):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            s.connect((ip, port))
+            banner = s.recv(1024).decode().strip()
+            return banner if banner else "Não disponível"
+    except:
+        return "Não disponível"
+
 #Funções de scan de portas
 def scan_port(ip, port, protocol, open_ports, close_ports, filtered_ports):
     """
@@ -56,16 +66,26 @@ def scan_port(ip, port, protocol, open_ports, close_ports, filtered_ports):
     # Tenta conectar ao IP e porta informados
     try:
         with socket.socket(family, sock) as s:
-            s.settimeout(0.5)
-            try:
-                s.connect((ip, port))  # Tenta conectar diretamente
-                state = 0 #OPEN
-            except socket.timeout: 
-                state = -1 #FILTERED
-            except ConnectionRefusedError: 
-                state = 111 #CLOSED
-            except Exception:
-                state = 111 #CLOSED
+            s.settimeout(1)
+            if protocol == "tcp":
+                try:
+                    s.connect((ip, port))  # Tenta conectar diretamente
+                    state = 0 #OPEN
+                except socket.timeout: 
+                    state = -1 #FILTERED
+                except ConnectionRefusedError: 
+                    state = 111 #CLOSED
+                except Exception:
+                    state = 111 #CLOSED
+            elif protocol == "udp":
+                try:
+                    s.sendto(b"\x00", (ip, port))
+                    s.recvfrom(1024)  # Tenta receber dados da porta
+                    state = 0 #OPEN
+                except socket.timeout: 
+                    state = -1 #FILTERED
+                except Exception:
+                    state = 111 #CLOSED
             
             try:
                 #Descobre o serviço da porta usando o diretório de portas conhecidas, se não encontrar, usa a função getservbyport
@@ -77,7 +97,8 @@ def scan_port(ip, port, protocol, open_ports, close_ports, filtered_ports):
                 service = "unknown"
             
             if state == 0:
-                open_ports[port] = service
+                os = get_banner(ip, port)
+                open_ports[port] = [service, os]
             elif state == 111:
                 close_ports[port] = service
             else:
@@ -106,8 +127,6 @@ def main():
     
     # Solicita ao usuário o IP ou rede a ser escaneado.
     ip_input = input("Digite o IP(ipv4 ou ipv6) ou a rede que deseja escanear (ex.: 192.168.1.1 ou 2001:0db8:85a3:0000:0000:8a2e:0370:7334 ou 192.168.1.0/24): \n").strip()
-    if "%" in ip_input:
-        ip_input = ip_input.split("%")[0]
     # Solicita ao usuário o range de portas a ser escaneado.
     port_range = input("\nDigite o range de portas(<int>-<int>), ou porta única(<int>), que deseja escanear (ex.: 80-443 ou 22): \n").strip()
     # Solicita ao usuário o protocolo a ser escaneado.
@@ -122,7 +141,7 @@ def main():
 
     # Se for rede, escaneia todas as portas
     if "/" in ip_input:
-        print(f"Escaneando todas as portas do IP {ip_input}...\n")
+        print(f"\nEscaneando todas as portas do IP {ip_input}...\n")
         ip_network = ipaddress.ip_network(ip_input, strict=False)
         for ip in ip_network.hosts():
             ip_str = str(ip)
@@ -135,9 +154,19 @@ def main():
                 threads.append(thread)
 
     # Se for IP, escaneia todas as portas
-    elif ip_pattern.match(ip_input) or ipv6_pattern.match(ip_input):
+    elif ip_pattern.match(ip_input):
         ip_ports[ip_input] = {"open": {}, "closed": {}, "filtered": {}}
-        print(f"Escaneando todas as portas do IP {ip_input}...\n")
+        print(f"\nEscaneando todas as portas do IP {ip_input}...\n")
+        for port in range(port_start, port_end + 1):
+            #Criando uma thread para cada porta
+            thread = threading.Thread(target=scan_port, args=(ip_input, port, protocol, ip_ports[ip_input]["open"], ip_ports[ip_input]["closed"], ip_ports[ip_input]["filtered"]))
+            thread.start()
+            threads.append(thread)
+
+    # Se for IPv6, escaneia todas as portas
+    else:
+        ip_ports[ip_input] = {"open": {}, "closed": {}, "filtered": {}}
+        print(f"\nEscaneando todas as portas do IP {ip_input}...\n")
         for port in range(port_start, port_end + 1):
             #Criando uma thread para cada porta
             thread = threading.Thread(target=scan_port, args=(ip_input, port, protocol, ip_ports[ip_input]["open"], ip_ports[ip_input]["closed"], ip_ports[ip_input]["filtered"]))
@@ -154,8 +183,8 @@ def main():
         if data["open"] or data["closed"]:
             print(f"IP: {ip}")
             print("  Open ports:")
-            for port, service in data["open"].items():
-                print(f"    - Porta {port} - open: {service}")
+            for port, service_os in data["open"].items():
+                print(f"    - Porta {port} - open: {service_os[0]} - OS: {service_os[1]}")
             print("  Closed ports:")
             for port, service in data["closed"].items():
                 print(f"    - Porta {port} - closed: {service}")
